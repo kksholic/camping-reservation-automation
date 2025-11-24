@@ -1,0 +1,41 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cat:*)",
+      "Bash(python:*)",
+      "Bash(pip install:*)",
+      "Bash(npm install)",
+      "Bash(npm run dev:*)",
+      "Bash(venvScriptspython.exe -m pip install -r requirements.txt)",
+      "Bash(.venvScriptspython.exe -m pip install --upgrade pip)",
+      "Bash(venv/Scripts/python.exe -m pip:*)",
+      "Bash(venv/Scripts/python.exe:*)",
+      "Bash(curl:*)",
+      "Bash(test:*)",
+      "Bash(start-servers.bat)",
+      "Bash(taskkill:*)",
+      "Bash(timeout /t 5 /nobreak)",
+      "Bash(nul)",
+      "Bash(venv/Scripts/pip:*)",
+      "Bash(netstat:*)",
+      "Bash(findstr:*)",
+      "Bash(venvScriptspython.exe run.py)",
+      "Bash(dir)",
+      "Bash(venvScriptspip install bcrypt==4.1.2 Flask-Limiter==3.5.0)",
+      "Bash(echo:*)",
+      "Bash(utils/__init__.py)",
+      "Bash(__init__.py)",
+      "Bash(del check_db.py test_password.py reset_admin.py)",
+      "Bash(dir:*)",
+      "Bash(timeout /t 2 /nobreak)",
+      "Bash(timeout /t 3 /nobreak)",
+      "Bash(git init:*)",
+      "Bash(git add:*)",
+      "Bash(del backendnul 2)",
+      "Bash(git rm:*)",
+      "Bash(del nul)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

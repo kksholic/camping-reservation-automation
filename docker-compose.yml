@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    container_name: camping-backend
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=production
+      - DATABASE_URL=sqlite:///../../data/camping.db
+    env_file:
+      - backend/.env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./backend/browser_data:/app/browser_data
+    restart: unless-stopped
+    networks:
+      - camping-network
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    container_name: camping-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - camping-network
+
+networks:
+  camping-network:
+    driver: bridge
+
+volumes:
+  data:
+  logs:
