@@ -110,8 +110,9 @@ class XTicketScraper:
             서버 시간 (datetime 객체) 또는 None
         """
         try:
-            # HEAD 요청으로 서버 시간만 가져오기 (빠름)
-            response = self._make_request_with_retry('GET', self.BASE_URL)
+            # 실제 캠핑장 페이지 URL 사용 (BASE_URL은 404 반환)
+            main_url = f"{self.BASE_URL}/web/main?shopEncode={self.shop_encode}"
+            response = self._make_request_with_retry('GET', main_url)
 
             # HTTP Date 헤더 파싱
             date_header = response.headers.get('Date')
@@ -135,9 +136,10 @@ class XTicketScraper:
             동기화 성공 여부
         """
         try:
-            local_time_before = datetime.utcnow()
+            from datetime import timezone
+            local_time_before = datetime.now(timezone.utc)
             server_time = self.get_server_time()
-            local_time_after = datetime.utcnow()
+            local_time_after = datetime.now(timezone.utc)
 
             if not server_time:
                 return False
@@ -239,6 +241,32 @@ class XTicketScraper:
         except Exception as e:
             logger.error(f"Logout error: {e}")
             return False
+
+    def _get_dry_run_setting(self) -> bool:
+        """
+        DRY_RUN 설정 가져오기 - DB 설정 우선, 환경 변수는 fallback
+
+        Returns:
+            bool: DRY_RUN 모드 여부
+        """
+        import os
+        try:
+            # Flask 앱 컨텍스트 필요
+            from flask import current_app
+            if current_app:
+                from app.models.database import AppSettings
+                settings = AppSettings.query.first()
+                if settings and settings.xticket_dry_run is not None:
+                    logger.debug(f"Using DRY_RUN from database: {settings.xticket_dry_run}")
+                    return settings.xticket_dry_run
+        except Exception as e:
+            # 앱 컨텍스트 없거나 DB 조회 실패 시 무시
+            logger.debug(f"Failed to get DRY_RUN from DB: {e}")
+
+        # Fallback: 환경 변수
+        env_dry_run = os.getenv('XTICKET_DRY_RUN', 'false').lower() == 'true'
+        logger.debug(f"Using DRY_RUN from environment: {env_dry_run}")
+        return env_dry_run
 
     def get_available_dates(self, year: int, month: int) -> list:
         """
@@ -485,7 +513,8 @@ class XTicketScraper:
 
     def make_reservation(self, target_date: str, product_codes: list,
                         product_group_code: str = "0004",
-                        book_days: int = 1) -> Dict[str, Any]:
+                        book_days: int = 1,
+                        dry_run: bool = None) -> Dict[str, Any]:
         """
         예약 실행 (우선순위 기반)
 
@@ -523,76 +552,109 @@ class XTicketScraper:
             play_dates.append(next_date.strftime('%Y%m%d'))
         play_date = ','.join(play_dates)
 
+        import random
+        import os
+
+        # 드라이런 모드 체크
+        # 1. 함수 인자로 전달된 값 (스케줄 설정)
+        # 2. DB 설정
+        # 3. 환경 변수 fallback
+        if dry_run is None:
+            dry_run = self._get_dry_run_setting()
+
+        # CAPTCHA 최대 재시도 횟수
+        max_captcha_retries = 10
+
         # 우선순위 순서대로 사이트 시도
         for product_code in product_codes:
             logger.info(f"Attempting reservation for site: {product_code}")
 
-            # CAPTCHA 이미지 URL 생성
-            import random
-            captcha_url = f"{self.BASE_URL}/Web/jcaptcha?r={random.random()}"
+            captcha_retries = 0
 
-            # CAPTCHA 해결
-            captcha_text = self._solve_captcha(captcha_url)
-            if not captcha_text:
-                logger.warning(f"Failed to solve CAPTCHA for {product_code}, trying next site")
-                continue
+            # 같은 좌석에 대해 CAPTCHA 재시도
+            while captcha_retries < max_captcha_retries:
+                # CAPTCHA 이미지 URL 생성
+                captcha_url = f"{self.BASE_URL}/Web/jcaptcha?r={random.random()}"
 
-            # 예약 요청
-            payload = {
-                "product_group_code": product_group_code,
-                "play_date": play_date,
-                "product_code": product_code,
-                "captcha": captcha_text
-            }
+                # CAPTCHA 해결
+                captcha_text = self._solve_captcha(captcha_url)
+                if not captcha_text:
+                    captcha_retries += 1
+                    logger.warning(f"Failed to solve CAPTCHA (attempt {captcha_retries}/{max_captcha_retries})")
+                    if captcha_retries >= max_captcha_retries:
+                        logger.warning(f"Max CAPTCHA solve failures for {product_code}, trying next site")
+                        break
+                    continue
 
-            # 드라이런 모드 체크
-            import os
-            dry_run = os.getenv('XTICKET_DRY_RUN', 'false').lower() == 'true'
-
-            if dry_run:
-                logger.info("🧪 DRY RUN MODE - 실제 예약하지 않음")
-                logger.info(f"예약 시뮬레이션: {payload}")
-                return {
-                    'success': True,
-                    'reservation_number': 'DRY_RUN_TEST',
-                    'selected_site': product_code,
-                    'target_date': target_date,
-                    'dry_run': True
+                # 예약 요청
+                payload = {
+                    "product_group_code": product_group_code,
+                    "play_date": play_date,
+                    "product_code": product_code,
+                    "captcha": captcha_text
                 }
 
-            try:
-                response = self.session.post(url, data=payload)
-                response.raise_for_status()
-
-                data = response.json()
-
-                # 응답 구조: {data: {...}}
-                result_data = data.get('data', {})
-
-                if result_data.get('success'):
-                    reservation_number = result_data.get('reservation_number') or result_data.get('book_no')
-                    logger.info(f"Reservation successful: {reservation_number} for site {product_code}")
+                if dry_run:
+                    logger.info("🧪 DRY RUN MODE - 실제 예약하지 않음")
+                    logger.info(f"예약 시뮬레이션: {payload}")
                     return {
                         'success': True,
-                        'reservation_number': reservation_number,
+                        'reservation_number': 'DRY_RUN_TEST',
                         'selected_site': product_code,
-                        'target_date': target_date
+                        'target_date': target_date,
+                        'dry_run': True
                     }
-                else:
-                    error_msg = result_data.get('message', 'Reservation failed')
-                    logger.warning(f"Reservation failed for {product_code}: {error_msg}")
 
-                    # CAPTCHA 오류면 재시도, 다른 오류면 다음 사이트 시도
-                    if 'captcha' in error_msg.lower() or '자동입력' in error_msg:
-                        logger.info("CAPTCHA error, retrying same site")
-                        continue
+                try:
+                    response = self.session.post(url, data=payload)
+                    response.raise_for_status()
+
+                    data = response.json()
+
+                    # 응답 구조 확인:
+                    # 성공: {data: {success: true, book_no: ...}}
+                    # 실패: {error: {message: ..., code: ...}}
+                    if 'error' in data:
+                        error_info = data.get('error', {})
+                        error_msg = error_info.get('message', 'Unknown error')
+                        logger.warning(f"Reservation failed for {product_code}: {error_msg}")
+
+                        # CAPTCHA 오류면 같은 좌석 재시도
+                        if 'captcha' in error_msg.lower() or '자동입력' in error_msg:
+                            captcha_retries += 1
+                            logger.info(f"CAPTCHA error (attempt {captcha_retries}/{max_captcha_retries}), retrying same site")
+                            if captcha_retries < max_captcha_retries:
+                                continue  # 같은 좌석 재시도 (내부 while 루프)
+                            else:
+                                logger.warning(f"Max CAPTCHA retries reached for {product_code}, trying next site")
+                                break  # 다음 좌석으로
+                        else:
+                            # 좌석 없음 등 다른 오류 - 다음 좌석 시도
+                            logger.info(f"Site {product_code} unavailable, trying next priority site")
+                            break  # 다음 좌석으로
+
+                    elif 'data' in data:
+                        result_data = data.get('data', {})
+                        if result_data.get('success'):
+                            reservation_number = result_data.get('reservation_number') or result_data.get('book_no')
+                            logger.info(f"Reservation successful: {reservation_number} for site {product_code}")
+                            return {
+                                'success': True,
+                                'reservation_number': reservation_number,
+                                'selected_site': product_code,
+                                'target_date': target_date
+                            }
+                        else:
+                            error_msg = result_data.get('message', 'Reservation failed')
+                            logger.warning(f"Reservation failed for {product_code}: {error_msg}")
+                            break  # 다음 좌석으로
                     else:
-                        logger.info(f"Site {product_code} unavailable, trying next priority site")
-                        continue
+                        logger.warning(f"Unknown response format: {data}")
+                        break  # 다음 좌석으로
 
-            except Exception as e:
-                logger.error(f"Reservation error for {product_code}: {e}")
-                continue
+                except Exception as e:
+                    logger.error(f"Reservation error for {product_code}: {e}")
+                    break  # 다음 좌석으로
 
         # 모든 우선순위 사이트에서 실패
         return {

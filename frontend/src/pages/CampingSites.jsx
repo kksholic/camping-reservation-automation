@@ -3,8 +3,7 @@ import {
   Box, Typography, Button, Paper, Table, TableBody, TableCell,
   TableContainer, TableHead, TableRow, IconButton, Chip, Alert,
   Dialog, DialogTitle, DialogContent, List, ListItem, ListItemText,
-  ListItemSecondaryAction, Badge, Tooltip, TextField, CircularProgress,
-  DialogActions, Divider
+  ListItemSecondaryAction, Badge, Tooltip
 } from '@mui/material'
 import DeleteIcon from '@mui/icons-material/Delete'
 import EditIcon from '@mui/icons-material/Edit'
@@ -12,8 +11,7 @@ import AddIcon from '@mui/icons-material/Add'
 import PeopleIcon from '@mui/icons-material/People'
 import ToggleOnIcon from '@mui/icons-material/ToggleOn'
 import ToggleOffIcon from '@mui/icons-material/ToggleOff'
-import PlayArrowIcon from '@mui/icons-material/PlayArrow'
-import { getCampingSites, createCampingSite, updateCampingSite, deleteCampingSite, getSiteAccounts, createSiteAccount, updateSiteAccount, deleteSiteAccount, toggleSiteAccount, createMultiAccountReservation } from '../services/api'
+import { getCampingSites, createCampingSite, updateCampingSite, deleteCampingSite, getSiteAccounts, createSiteAccount, updateSiteAccount, deleteSiteAccount, toggleSiteAccount } from '../services/api'
 import CampingSiteDialog from '../components/CampingSiteDialog'
 import CampingSiteAccountDialog from '../components/CampingSiteAccountDialog'
 
@@ -30,13 +28,6 @@ export default function CampingSites() {
   const [accounts, setAccounts] = useState([])
   const [accountDialogOpen, setAccountDialogOpen] = useState(false)
   const [selectedAccount, setSelectedAccount] = useState(null)
-
-  // 멀티 계정 예약 관련 상태
-  const [reservationDate, setReservationDate] = useState('')
-  const [siteName, setSiteName] = useState('')
-  const [zoneCode, setZoneCode] = useState('')
-  const [reserving, setReserving] = useState(false)
-  const [reservationResult, setReservationResult] = useState(null)
 
   useEffect(() => {
     loadSites()
@@ -161,45 +152,6 @@ export default function CampingSites() {
     }
   }
 
-  // 멀티 계정 동시 예약 핸들러
-  const handleMultiAccountReservation = async () => {
-    if (!reservationDate) {
-      setError('예약 날짜를 입력해주세요')
-      return
-    }
-
-    const activeAccounts = accounts.filter(acc => acc.is_active)
-    if (activeAccounts.length === 0) {
-      setError('활성화된 계정이 없습니다')
-      return
-    }
-
-    setReserving(true)
-    setReservationResult(null)
-    setError('')
-
-    try {
-      const result = await createMultiAccountReservation({
-        camping_site_id: selectedSiteForAccounts.id,
-        target_date: reservationDate,
-        site_name: siteName || undefined,
-        zone_code: zoneCode || undefined
-      })
-
-      setReservationResult(result)
-      if (result.success) {
-        setSuccess(`예약 성공! ${result.message}`)
-      } else {
-        setError(result.message)
-      }
-    } catch (error) {
-      console.error('Failed to create multi-account reservation:', error)
-      setError(error.response?.data?.error || '멀티 계정 예약에 실패했습니다')
-    } finally {
-      setReserving(false)
-    }
-  }
-
   const getStatusChip = (site) => {
     const hasLogin = site.login_username && site.login_password
     const hasBooker = site.booker_name && site.booker_phone
@@ -239,6 +191,10 @@ export default function CampingSites() {
           {error}
         </Alert>
       )}
+
+      <Alert severity="info" sx={{ mb: 2 }}>
+        캠핑장과 예약에 사용할 계정을 등록하세요. 예약은 "자동 예약" 메뉴에서 진행합니다.
+      </Alert>
 
       <TableContainer component={Paper}>
         <Table>
@@ -422,101 +378,9 @@ export default function CampingSites() {
             </List>
           )}
 
-          {/* 멀티 계정 동시 예약 섹션 */}
-          {accounts.length > 0 && (
-            <>
-              <Divider sx={{ my: 3 }} />
-              <Box>
-                <Typography variant="h6" gutterBottom>
-                  멀티 계정 동시 예약
-                </Typography>
-                <Typography variant="body2" color="text.secondary" paragraph>
-                  활성화된 모든 계정으로 동시에 예약을 시도합니다. 각 계정은 독립적으로 다른 좌석을 예약할 수 있습니다.
-                </Typography>
-
-                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                  <TextField
-                    label="예약 날짜 *"
-                    type="date"
-                    value={reservationDate}
-                    onChange={(e) => setReservationDate(e.target.value)}
-                    InputLabelProps={{ shrink: true }}
-                    fullWidth
-                    disabled={reserving}
-                  />
-                  <TextField
-                    label="사이트 이름 (선택)"
-                    value={siteName}
-                    onChange={(e) => setSiteName(e.target.value)}
-                    fullWidth
-                    disabled={reserving}
-                    placeholder="예: A구역-01"
-                  />
-                  <TextField
-                    label="구역 코드 (선택)"
-                    value={zoneCode}
-                    onChange={(e) => setZoneCode(e.target.value)}
-                    fullWidth
-                    disabled={reserving}
-                    placeholder="예: ZONE_A"
-                  />
-                  <Button
-                    variant="contained"
-                    color="primary"
-                    size="large"
-                    startIcon={reserving ? <CircularProgress size={20} /> : <PlayArrowIcon />}
-                    onClick={handleMultiAccountReservation}
-                    disabled={reserving || !reservationDate}
-                    fullWidth
-                  >
-                    {reserving ? '예약 시도 중...' : `${accounts.filter(a => a.is_active).length}개 계정으로 동시 예약 시작`}
-                  </Button>
-                </Box>
-
-                {/* 예약 결과 표시 */}
-                {reservationResult && (
-                  <Box sx={{ mt: 3 }}>
-                    <Alert severity={reservationResult.success ? 'success' : 'error'}>
-                      <Typography variant="body2" fontWeight="bold">
-                        {reservationResult.message}
-                      </Typography>
-                      <Box sx={{ mt: 1 }}>
-                        <Typography variant="caption" display="block">
-                          성공: {reservationResult.successful_count}개 | 실패: {reservationResult.failed_count}개
-                        </Typography>
-                        <Typography variant="caption" display="block">
-                          시도한 계정 수: {reservationResult.accounts_attempted}
-                        </Typography>
-                      </Box>
-                    </Alert>
-
-                    {/* 모든 계정 결과 상세 */}
-                    {reservationResult.all_results && reservationResult.all_results.length > 0 && (
-                      <Paper sx={{ mt: 2, p: 2, bgcolor: 'background.default' }}>
-                        <Typography variant="subtitle2" gutterBottom>
-                          상세 결과
-                        </Typography>
-                        <List dense>
-                          {reservationResult.all_results.map((result, index) => (
-                            <ListItem key={index}>
-                              <ListItemText
-                                primary={result.account_nickname}
-                                secondary={
-                                  result.success
-                                    ? `✅ 성공: ${result.reservation_number}`
-                                    : `❌ 실패: ${result.error_message || '알 수 없는 오류'}`
-                                }
-                              />
-                            </ListItem>
-                          ))}
-                        </List>
-                      </Paper>
-                    )}
-                  </Box>
-                )}
-              </Box>
-            </>
-          )}
+          <Alert severity="info" sx={{ mt: 2 }}>
+            계정 등록 후 "자동 예약" 메뉴에서 예약을 진행하세요.
+          </Alert>
         </DialogContent>
       </Dialog>
 

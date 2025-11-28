@@ -5,9 +5,8 @@ import { CssBaseline, Box, AppBar, Toolbar, Typography, Container, IconButton, M
 import { AccountCircle } from '@mui/icons-material'
 import Dashboard from './pages/Dashboard'
 import CampingSites from './pages/CampingSites'
-import Monitoring from './pages/Monitoring'
+import AutoReservation from './pages/AutoReservation'
 import Reservations from './pages/Reservations'
-import SiteSelection from './pages/SiteSelection'
 import Settings from './pages/Settings'
 import Login from './pages/Login'
 import Navigation from './components/Navigation'
@@ -126,8 +125,7 @@ function App() {
                 <Routes>
                   <Route path="/" element={<PrivateRoute isAuthenticated={isAuthenticated}><Dashboard /></PrivateRoute>} />
                   <Route path="/sites" element={<PrivateRoute isAuthenticated={isAuthenticated}><CampingSites /></PrivateRoute>} />
-                  <Route path="/site-selection" element={<PrivateRoute isAuthenticated={isAuthenticated}><SiteSelection /></PrivateRoute>} />
-                  <Route path="/monitoring" element={<PrivateRoute isAuthenticated={isAuthenticated}><Monitoring /></PrivateRoute>} />
+                  <Route path="/auto-reservation" element={<PrivateRoute isAuthenticated={isAuthenticated}><AutoReservation /></PrivateRoute>} />
                   <Route path="/reservations" element={<PrivateRoute isAuthenticated={isAuthenticated}><Reservations /></PrivateRoute>} />
                   <Route path="/settings" element={<PrivateRoute isAuthenticated={isAuthenticated}><Settings username={username} onUsernameChange={handleUsernameChange} /></PrivateRoute>} />
                   <Route path="/login" element={<Navigate to="/" />} />

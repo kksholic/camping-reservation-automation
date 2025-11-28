@@ -1,40 +1,58 @@
 """텔레그램 알림"""
 import os
-from telegram import Bot
-from telegram.error import TelegramError
+import requests
 from loguru import logger
 
 
 class TelegramNotifier:
-    """텔레그램 알림 서비스"""
+    """텔레그램 알림 서비스 (requests 기반 동기 방식)"""
 
-    def __init__(self):
-        self.bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
-        self.chat_id = os.getenv('TELEGRAM_CHAT_ID')
-        self.bot = None
+    def __init__(self, bot_token: str = None, chat_id: str = None):
+        """
+        Args:
+            bot_token: 텔레그램 봇 토큰 (None이면 환경 변수에서 읽음)
+            chat_id: 텔레그램 채팅 ID (None이면 환경 변수에서 읽음)
+        """
+        self.bot_token = bot_token or os.getenv('TELEGRAM_BOT_TOKEN')
+        self.chat_id = chat_id or os.getenv('TELEGRAM_CHAT_ID')
+        self.api_base = f"https://api.telegram.org/bot{self.bot_token}" if self.bot_token else None
 
         if self.bot_token and self.chat_id:
-            self.bot = Bot(token=self.bot_token)
             logger.info("Telegram bot initialized")
         else:
             logger.warning("Telegram credentials not configured")
 
-    def send_message(self, message: str):
-        """메시지 전송"""
-        if not self.bot:
+    def send_message(self, message: str) -> bool:
+        """메시지 전송
+
+        Returns:
+            bool: 성공 여부
+        """
+        if not self.bot_token or not self.chat_id:
             logger.warning("Telegram bot not configured, skipping notification")
-            return
+            return False
 
         try:
-            self.bot.send_message(
-                chat_id=self.chat_id,
-                text=message,
-                parse_mode='HTML'
-            )
-            logger.info(f"Telegram message sent: {message[:50]}...")
+            url = f"{self.api_base}/sendMessage"
+            payload = {
+                'chat_id': self.chat_id,
+                'text': message,
+                'parse_mode': 'HTML'
+            }
 
-        except TelegramError as e:
+            response = requests.post(url, json=payload, timeout=10)
+            result = response.json()
+
+            if result.get('ok'):
+                logger.info(f"Telegram message sent: {message[:50]}...")
+                return True
+            else:
+                logger.error(f"Telegram API error: {result.get('description', 'Unknown error')}")
+                return False
+
+        except requests.RequestException as e:
             logger.error(f"Failed to send Telegram message: {e}")
+            return False
 
     def send_availability_notification(self, camping_site: str, date: str):
         """예약 가능 알림"""
@@ -48,7 +66,7 @@ class TelegramNotifier:
 """
         self.send_message(message)
 
-    def send_reservation_success(self, camping_site: str, date: str, reservation_number: str = None):
+    def send_reservation_success(self, camping_site: str, date: str, reservation_number: str = None, seat_name: str = None):
         """예약 성공 알림"""
         message = f"""
 ✅ <b>예약 성공!</b>
@@ -56,6 +74,8 @@ class TelegramNotifier:
 캠핑장: {camping_site}
 날짜: {date}
 """
+        if seat_name:
+            message += f"사이트: {seat_name}\n"
         if reservation_number:
             message += f"예약번호: {reservation_number}\n"
 

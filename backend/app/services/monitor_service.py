@@ -5,7 +5,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from loguru import logger
 
 from app import db
-from app.models.database import MonitoringTarget, Reservation
+from app.models.database import MonitoringTarget, Reservation, AppSettings
 from app.scrapers.gocamp_scraper import GoCampScraper
 from app.scrapers.naver_scraper import NaverScraper
 from app.scrapers.xticket_scraper import XTicketScraper
@@ -23,7 +23,20 @@ class MonitorService:
             'naver': NaverScraper(),
             'xticket': self._create_xticket_scraper()
         }
-        self.notifier = TelegramNotifier()
+        self.notifier = self._create_notifier()
+
+    def _create_notifier(self):
+        """텔레그램 알림 생성 - DB 설정 우선 사용"""
+        try:
+            settings = AppSettings.query.first()
+            if settings and settings.telegram_bot_token and settings.telegram_chat_id:
+                logger.info("Using Telegram settings from database")
+                return TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
+        except Exception as e:
+            logger.warning(f"Failed to load Telegram settings from DB: {e}")
+
+        logger.info("Using Telegram settings from environment")
+        return TelegramNotifier()  # 환경 변수 fallback
 
     def _create_xticket_scraper(self):
         """XTicket 스크래퍼 생성 (환경변수 기반)"""

@@ -24,6 +24,16 @@ export const getCampingSites = () => api.get('/camping-sites').then(res => res.d
 export const createCampingSite = (data) => api.post('/camping-sites', data).then(res => res.data)
 export const updateCampingSite = (id, data) => api.put(`/camping-sites/${id}`, data).then(res => res.data)
 export const deleteCampingSite = (id) => api.delete(`/camping-sites/${id}`).then(res => res.data)
+export const getCampingSiteServerTime = (siteId) => api.get(`/camping-sites/${siteId}/server-time`).then(res => res.data)
+export const getAvailableSites = (siteId, data) => api.post(`/camping-sites/${siteId}/available-sites`, data).then(res => res.data)
+export const getProductGroups = (siteId, data) => api.post(`/camping-sites/${siteId}/product-groups`, data).then(res => res.data)
+
+// 좌석 관리
+export const getCampingSiteSeats = (siteId, category) => {
+  const params = category ? { category } : {}
+  return api.get(`/camping-sites/${siteId}/seats`, { params }).then(res => res.data)
+}
+export const getSeatsByCategory = (siteId) => api.get(`/camping-sites/${siteId}/seats/by-category`).then(res => res.data)
 
 // 캠핑장 계정 관리
 export const getSiteAccounts = (siteId) => api.get(`/camping-sites/${siteId}/accounts`).then(res => res.data)
@@ -39,11 +49,23 @@ export const startMonitoring = () => api.post('/monitoring/start').then(res => r
 export const stopMonitoring = () => api.post('/monitoring/stop').then(res => res.data)
 export const getMonitoringStatus = () => api.get('/monitoring/status').then(res => res.data)
 
-// 스케줄 관리
-export const getSchedules = () => api.get('/monitoring/schedules').then(res => res.data)
-export const createSchedule = (data) => api.post('/monitoring/schedule', data).then(res => res.data)
-export const deleteSchedule = (jobId) => api.delete(`/monitoring/schedule/${jobId}`).then(res => res.data)
+// 스케줄 관리 (기존 - 모니터링용)
+export const getMonitoringSchedules = () => api.get('/monitoring/schedules').then(res => res.data)
+export const createMonitoringSchedule = (data) => api.post('/monitoring/schedule', data).then(res => res.data)
+export const deleteMonitoringSchedule = (jobId) => api.delete(`/monitoring/schedule/${jobId}`).then(res => res.data)
 export const getServerTimeInfo = () => api.get('/monitoring/server-time').then(res => res.data)
+export const getServerTime = () => api.get('/server-time').then(res => res.data)
+
+// 예약 스케줄 관리 (새로운 자동 예약용)
+export const getReservationSchedules = () => api.get('/schedules').then(res => res.data)
+export const createReservationSchedule = (data) => api.post('/schedules', data).then(res => res.data)
+export const getReservationSchedule = (id) => api.get(`/schedules/${id}`).then(res => res.data)
+export const deleteReservationSchedule = (id) => api.delete(`/schedules/${id}`).then(res => res.data)
+export const toggleReservationSchedule = (id) => api.post(`/schedules/${id}/toggle`).then(res => res.data)
+export const cancelReservationSchedule = (id) => api.post(`/schedules/${id}/cancel`).then(res => res.data)
+
+// 캠핑장 계정 별칭 (AutoReservation에서 사용)
+export const getCampingSiteAccounts = (siteId) => api.get(`/camping-sites/${siteId}/accounts`).then(res => res.data)
 
 // 예약 관리
 export const getReservations = () => api.get('/reservations').then(res => res.data)
@@ -57,6 +79,12 @@ export const getStatistics = () => api.get('/statistics').then(res => res.data)
 // XTicket 좌석 조회
 export const getXTicketSites = (targetDate, productGroupCode = '0004') =>
   api.post('/xticket/sites', { target_date: targetDate, product_group_code: productGroupCode }).then(res => res.data)
+
+// 앱 설정
+export const getSettings = () => api.get('/settings').then(res => res.data)
+export const updateTelegramSettings = (data) => api.put('/settings/telegram', data).then(res => res.data)
+export const testTelegram = () => api.post('/settings/telegram/test').then(res => res.data)
+export const getTelegramChats = () => api.get('/settings/telegram/chats').then(res => res.data)
 
 export default {
   healthCheck,
@@ -78,5 +106,8 @@ export default {
   createReservation,
   createMultiAccountReservation,
   getStatistics,
-  getXTicketSites
+  getXTicketSites,
+  getSettings,
+  updateTelegramSettings,
+  testTelegram
 }

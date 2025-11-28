@@ -66,6 +66,13 @@ def create_app(config_name='default'):
         from app.utils.auth import create_default_admin
         create_default_admin()
 
+    # 스케줄러 시작 (reloader 프로세스가 아닌 경우에만)
+    import os
+    if os.environ.get('WERKZEUG_RUN_MAIN') == 'true' or not app.debug:
+        from app.services.scheduler_service import scheduler_service
+        scheduler_service.start()
+        logger.info("Scheduler service started")
+
     logger.info(f"Flask app created with config: {config_name}")
 
     return app

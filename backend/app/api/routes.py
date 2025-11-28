@@ -1,11 +1,13 @@
 """API 라우트"""
 from flask import Blueprint, jsonify, request, session
 from loguru import logger
+from datetime import datetime, timedelta, timezone
 
-from app.models.database import CampingSite, CampingSiteAccount, Reservation, MonitoringTarget, UserInfo
+from app.models.database import CampingSite, CampingSiteAccount, CampingSiteSeat, Reservation, MonitoringTarget, UserInfo, AppSettings, ReservationSchedule
 from app.services.monitor_service import MonitorService
 from app.services.reservation_service import ReservationService
 from app.services.multi_account_reservation_service import MultiAccountReservationService
+from app.services.scheduler_service import scheduler_service
 from app.utils.auth import authenticate_user, require_auth
 from app import db, limiter
 import os
@@ -23,6 +25,17 @@ multi_account_service = MultiAccountReservationService()
 def health_check():
     """헬스 체크"""
     return jsonify({'status': 'healthy', 'message': 'Server is running'}), 200
+
+
+@bp.route('/server-time', methods=['GET'])
+@require_auth
+def get_simple_server_time():
+    """간단한 서버 시간 조회 (AutoReservation용)"""
+    now = datetime.now()
+    return jsonify({
+        'server_time': now.isoformat(),
+        'timestamp': now.timestamp() * 1000  # 밀리초
+    }), 200
 
 
 # 인증 관련
@@ -173,6 +186,63 @@ def delete_camping_site(site_id):
 
     logger.info(f"Deleted camping site: {site.name}")
     return jsonify({'message': 'Camping site deleted'}), 200
+
+
+@bp.route('/camping-sites/<int:site_id>/server-time', methods=['GET'])
+@require_auth
+def get_camping_site_server_time(site_id):
+    """캠핑장 서버 시간 조회 및 offset 계산"""
+    try:
+        site = CampingSite.query.get_or_404(site_id)
+
+        # URL에서 shop_encode 파싱
+        from urllib.parse import urlparse, parse_qs
+        from app.scrapers.xticket_scraper import XTicketScraper
+
+        parsed_url = urlparse(site.url)
+        query_params = parse_qs(parsed_url.query)
+
+        shop_encode = query_params.get('shopEncode', [None])[0]
+
+        if not shop_encode:
+            logger.error(f"Missing shopEncode in URL: {site.url}")
+            return jsonify({'error': 'Invalid camping site URL format'}), 400
+
+        # XTicket 스크래퍼 생성 (서버 시간 조회에는 shop_code가 필요 없지만 생성자에서 필수이므로 shop_encode를 재사용)
+        scraper = XTicketScraper(shop_encode=shop_encode, shop_code=shop_encode)
+
+        # 로컬 시간 기록 (before)
+        local_time_before = datetime.now(timezone.utc)
+
+        # 서버 시간 조회
+        server_time = scraper.get_server_time()
+
+        # 로컬 시간 기록 (after)
+        local_time_after = datetime.now(timezone.utc)
+
+        if not server_time:
+            logger.warning(f"Failed to get server time for site {site.name}")
+            return jsonify({'error': 'Failed to get server time'}), 500
+
+        # RTT 보정된 로컬 시간 계산 (요청 전후 평균)
+        rtt = (local_time_after - local_time_before).total_seconds()
+        local_time_avg = local_time_before + timedelta(seconds=rtt / 2)
+
+        # Offset 계산 (서버 시간 - 로컬 시간)
+        offset_seconds = (server_time - local_time_avg).total_seconds()
+
+        logger.info(f"Server time for {site.name}: {server_time}, offset: {offset_seconds:.3f}s, RTT: {rtt:.3f}s")
+
+        return jsonify({
+            'server_time': server_time.strftime('%Y-%m-%d %H:%M:%S'),
+            'local_time': local_time_avg.strftime('%Y-%m-%d %H:%M:%S'),
+            'offset_seconds': offset_seconds,
+            'rtt_seconds': rtt
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error getting camping site server time: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
 
 
 # 캠핑장 계정 관리
@@ -346,6 +416,23 @@ def stop_monitoring():
         return jsonify({'message': 'Monitoring stopped'}), 200
     except Exception as e:
         logger.error(f"Failed to stop monitoring: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/monitoring/server-time', methods=['GET'])
+@require_auth
+def get_server_time():
+    """서버 시간 정보 조회"""
+    try:
+        now = datetime.now()
+        return jsonify({
+            'server_time': now.strftime('%Y-%m-%d %H:%M:%S'),
+            'hour': now.hour,
+            'minute': now.minute,
+            'second': now.second
+        }), 200
+    except Exception as e:
+        logger.error(f"Failed to get server time: {e}")
         return jsonify({'error': str(e)}), 500
 
 
@@ -525,7 +612,9 @@ def create_multi_account_reservation():
             camping_site=camping_site,
             target_date=data['target_date'],
             site_name=data.get('site_name'),
-            zone_code=data.get('zone_code')
+            zone_code=data.get('zone_code'),
+            reservation_time=data.get('reservation_time'),
+            server_time_offset=data.get('server_time_offset', 0)  # 서버 시간 오프셋 전달
         )
 
         return jsonify(result), 200 if result['success'] else 400
@@ -593,3 +682,650 @@ def get_statistics():
     }
 
     return jsonify(stats), 200
+
+
+# 앱 설정
+@bp.route('/settings', methods=['GET'])
+@require_auth
+def get_settings():
+    """앱 설정 조회"""
+    try:
+        settings = AppSettings.query.first()
+        if not settings:
+            # 설정이 없으면 빈 설정 생성
+            settings = AppSettings()
+            db.session.add(settings)
+            db.session.commit()
+
+        return jsonify(settings.to_dict()), 200
+    except Exception as e:
+        logger.error(f"Failed to get settings: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/settings/telegram', methods=['PUT'])
+@require_auth
+def update_telegram_settings():
+    """텔레그램 설정 업데이트"""
+    try:
+        data = request.json
+
+        settings = AppSettings.query.first()
+        if not settings:
+            settings = AppSettings()
+            db.session.add(settings)
+
+        settings.telegram_bot_token = data.get('telegram_bot_token', '')
+        settings.telegram_chat_id = data.get('telegram_chat_id', '')
+
+        # xticket_dry_run 필드도 업데이트 (있으면)
+        if 'xticket_dry_run' in data:
+            settings.xticket_dry_run = data.get('xticket_dry_run', False)
+
+        db.session.commit()
+
+        logger.info(f"✅ Telegram settings updated")
+        return jsonify({
+            'success': True,
+            'message': '텔레그램 설정이 저장되었습니다',
+            'settings': settings.to_dict()
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Failed to update telegram settings: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/settings/telegram/test', methods=['POST'])
+@require_auth
+def test_telegram():
+    """텔레그램 알림 테스트"""
+    try:
+        settings = AppSettings.query.first()
+        if not settings or not settings.telegram_bot_token or not settings.telegram_chat_id:
+            return jsonify({
+                'success': False,
+                'message': '텔레그램 설정이 없습니다'
+            }), 400
+
+        # 텔레그램 알림 테스트
+        from app.notifications.telegram_notifier import TelegramNotifier
+        notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
+
+        success = notifier.send_message(
+            "🔔 테스트 알림\n\n"
+            "텔레그램 알림이 정상적으로 작동합니다!"
+        )
+
+        if success:
+            return jsonify({
+                'success': True,
+                'message': '테스트 알림이 전송되었습니다'
+            }), 200
+        else:
+            return jsonify({
+                'success': False,
+                'message': '알림 전송에 실패했습니다'
+            }), 500
+
+    except Exception as e:
+        logger.error(f"Failed to test telegram: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/camping-sites/<int:site_id>/available-sites', methods=['POST'])
+@require_auth
+@limiter.limit("30 per minute")
+def get_available_sites(site_id):
+    """캠핑장 사용 가능한 좌석 목록 조회"""
+    try:
+        site = CampingSite.query.get_or_404(site_id)
+        data = request.json
+
+        target_date = data.get('target_date')  # YYYY-MM-DD
+        product_group_code = data.get('product_group_code', '0004')  # 기본값: 파쇄석사이트
+
+        if not target_date:
+            return jsonify({'error': 'target_date is required'}), 400
+
+        # URL에서 shop_encode 파싱
+        from urllib.parse import urlparse, parse_qs
+        from app.scrapers.xticket_scraper import XTicketScraper
+
+        parsed_url = urlparse(site.url)
+        query_params = parse_qs(parsed_url.query)
+        shop_encode = query_params.get('shopEncode', [None])[0]
+
+        if not shop_encode:
+            logger.error(f"Missing shopEncode in URL: {site.url}")
+            return jsonify({'error': 'Invalid camping site URL format'}), 400
+
+        # XTicket 스크래퍼 생성
+        scraper = XTicketScraper(shop_encode=shop_encode, shop_code=shop_encode)
+
+        # 사용 가능한 좌석 조회
+        available_sites = scraper.get_available_sites(target_date, product_group_code)
+
+        logger.info(f"Found {len(available_sites)} available sites for {site.name} on {target_date}")
+
+        return jsonify({
+            'target_date': target_date,
+            'product_group_code': product_group_code,
+            'available_sites': available_sites,
+            'count': len(available_sites)
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Failed to get available sites: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/camping-sites/<int:site_id>/product-groups', methods=['POST'])
+@require_auth
+@limiter.limit("30 per minute")
+def get_product_groups(site_id):
+    """캠핑장 상품 그룹(구역) 목록 조회"""
+    try:
+        site = CampingSite.query.get_or_404(site_id)
+        data = request.json
+
+        start_date = data.get('start_date')  # YYYYMMDD
+        end_date = data.get('end_date')  # YYYYMMDD
+
+        if not start_date or not end_date:
+            return jsonify({'error': 'start_date and end_date are required'}), 400
+
+        # URL에서 shop_encode 파싱
+        from urllib.parse import urlparse, parse_qs
+        from app.scrapers.xticket_scraper import XTicketScraper
+
+        parsed_url = urlparse(site.url)
+        query_params = parse_qs(parsed_url.query)
+        shop_encode = query_params.get('shopEncode', [None])[0]
+
+        if not shop_encode:
+            logger.error(f"Missing shopEncode in URL: {site.url}")
+            return jsonify({'error': 'Invalid camping site URL format'}), 400
+
+        # XTicket 스크래퍼 생성
+        scraper = XTicketScraper(shop_encode=shop_encode, shop_code=shop_encode)
+
+        # 상품 그룹 조회
+        product_groups = scraper.get_product_groups(start_date, end_date)
+
+        logger.info(f"Found {len(product_groups)} product groups for {site.name}")
+
+        return jsonify({
+            'start_date': start_date,
+            'end_date': end_date,
+            'product_groups': product_groups,
+            'count': len(product_groups)
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Failed to get product groups: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+# ========================================
+# 좌석 관리
+# ========================================
+
+@bp.route('/camping-sites/<int:site_id>/seats', methods=['GET'])
+@require_auth
+@limiter.limit("60 per minute")
+def get_camping_site_seats(site_id):
+    """
+    캠핑장의 전체 좌석 목록 조회 (카테고리별 분류)
+
+    Query Parameters:
+        - category: 좌석 카테고리 필터 (grass, deck, crushed_stone)
+
+    Returns:
+        {
+            'seats': [
+                {
+                    'id': 1,
+                    'product_code': '00040009',
+                    'product_group_code': '0004',
+                    'seat_name': '금관-09',
+                    'seat_category': 'crushed_stone',
+                    'display_order': 209
+                },
+                ...
+            ],
+            'count': 60,
+            'categories': {
+                'grass': 20,
+                'deck': 15,
+                'crushed_stone': 25
+            }
+        }
+    """
+    try:
+        site = CampingSite.query.get_or_404(site_id)
+        logger.info(f"Fetching seats for camping site: {site.name} (ID: {site_id})")
+
+        # 카테고리 필터
+        category = request.args.get('category')
+
+        # 쿼리 생성
+        query = CampingSiteSeat.query.filter_by(camping_site_id=site_id).order_by(CampingSiteSeat.display_order)
+
+        if category:
+            query = query.filter_by(seat_category=category)
+
+        seats = query.all()
+
+        # 카테고리별 개수 계산
+        grass_count = CampingSiteSeat.query.filter_by(
+            camping_site_id=site_id,
+            seat_category='grass'
+        ).count()
+        deck_count = CampingSiteSeat.query.filter_by(
+            camping_site_id=site_id,
+            seat_category='deck'
+        ).count()
+        crushed_stone_count = CampingSiteSeat.query.filter_by(
+            camping_site_id=site_id,
+            seat_category='crushed_stone'
+        ).count()
+
+        return jsonify({
+            'seats': [seat.to_dict() for seat in seats],
+            'count': len(seats),
+            'categories': {
+                'grass': grass_count,
+                'deck': deck_count,
+                'crushed_stone': crushed_stone_count,
+                'total': grass_count + deck_count + crushed_stone_count
+            }
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Failed to get camping site seats: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/camping-sites/<int:site_id>/seats/by-category', methods=['GET'])
+@require_auth
+@limiter.limit("60 per minute")
+def get_seats_by_category(site_id):
+    """
+    카테고리별로 그룹화된 좌석 목록 조회
+
+    Returns:
+        {
+            'grass': [
+                {'id': 1, 'seat_name': '금관-01', 'product_code': '00010001', ...},
+                ...
+            ],
+            'deck': [...],
+            'crushed_stone': [...]
+        }
+    """
+    try:
+        site = CampingSite.query.get_or_404(site_id)
+        logger.info(f"Fetching seats by category for: {site.name} (ID: {site_id})")
+
+        # 카테고리별 좌석 조회 (한글 카테고리명 사용)
+        grass_seats = CampingSiteSeat.query.filter_by(
+            camping_site_id=site_id,
+            seat_category='잔디사이트'
+        ).order_by(CampingSiteSeat.display_order).all()
+
+        deck_seats = CampingSiteSeat.query.filter_by(
+            camping_site_id=site_id,
+            seat_category='데크사이트'
+        ).order_by(CampingSiteSeat.display_order).all()
+
+        crushed_stone_seats = CampingSiteSeat.query.filter_by(
+            camping_site_id=site_id,
+            seat_category='파쇄석사이트'
+        ).order_by(CampingSiteSeat.display_order).all()
+
+        return jsonify({
+            'grass': [seat.to_dict() for seat in grass_seats],
+            'deck': [seat.to_dict() for seat in deck_seats],
+            'crushed_stone': [seat.to_dict() for seat in crushed_stone_seats],
+            'total_count': len(grass_seats) + len(deck_seats) + len(crushed_stone_seats)
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Failed to get seats by category: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+# =====================================================
+# 스케줄 예약 관리
+# =====================================================
+
+@bp.route('/schedules', methods=['GET'])
+@require_auth
+def get_reservation_schedules():
+    """예약 스케줄 목록 조회"""
+    try:
+        schedules = ReservationSchedule.query.order_by(ReservationSchedule.execute_at.desc()).all()
+        return jsonify({
+            'schedules': [s.to_dict() for s in schedules],
+            'count': len(schedules)
+        }), 200
+    except Exception as e:
+        logger.error(f"Failed to get schedules: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/schedules', methods=['POST'])
+@require_auth
+def create_reservation_schedule():
+    """
+    예약 스케줄 생성 (고도화 버전)
+
+    지원 기능:
+    - 다중 좌석 우선순위 (seat_ids)
+    - Wave Attack 간격 설정
+    - Burst Retry 설정
+    - Pre-fire 시간 설정
+    - Session Warmup 시간 설정
+    """
+    try:
+        data = request.json
+        logger.info(f"Creating schedule: {data}")
+
+        # 필수 필드 검증
+        if not data.get('camping_site_id'):
+            return jsonify({'error': '캠핑장을 선택해주세요'}), 400
+        if not data.get('execute_at'):
+            return jsonify({'error': '실행 시간을 입력해주세요'}), 400
+        if not data.get('target_date'):
+            return jsonify({'error': '예약 날짜를 입력해주세요'}), 400
+
+        # 실행 시간 파싱
+        execute_at = datetime.fromisoformat(data['execute_at'].replace('Z', '+00:00'))
+        if execute_at.tzinfo:
+            execute_at = execute_at.replace(tzinfo=None)
+
+        # 타겟 날짜 파싱
+        target_date = datetime.strptime(data['target_date'], '%Y-%m-%d').date()
+
+        # 좌석 처리: seat_ids (다중) 또는 seat_id (단일) 지원
+        seat_ids = data.get('seat_ids')
+        seat_id = data.get('seat_id')
+
+        # 단일 좌석이 주어진 경우 배열로 변환
+        if seat_id and not seat_ids:
+            seat_ids = [seat_id]
+
+        # 고급 설정 기본값
+        wave_interval_ms = data.get('wave_interval_ms', 50)
+        burst_retry_count = data.get('burst_retry_count', 3)
+        pre_fire_ms = data.get('pre_fire_ms', 0)
+        session_warmup_minutes = data.get('session_warmup_minutes', 5)
+        dry_run = data.get('dry_run', False)  # DRY_RUN 모드 (기본: False)
+
+        # 스케줄 생성
+        schedule = ReservationSchedule(
+            camping_site_id=data['camping_site_id'],
+            execute_at=execute_at,
+            target_date=target_date,
+            seat_ids=seat_ids,
+            seat_id=seat_id,  # 하위 호환성
+            account_ids=data.get('account_ids'),
+            retry_count=data.get('retry_count', 3),
+            retry_interval=data.get('retry_interval', 30),
+            wave_interval_ms=wave_interval_ms,
+            burst_retry_count=burst_retry_count,
+            pre_fire_ms=pre_fire_ms,
+            session_warmup_minutes=session_warmup_minutes,
+            dry_run=dry_run,
+            status='pending'
+        )
+
+        db.session.add(schedule)
+        db.session.flush()  # ID 생성
+
+        # APScheduler에 작업 등록 (워밍업 포함)
+        job_id, warmup_job_id = scheduler_service.add_reservation_job(
+            schedule.id,
+            execute_at,
+            warmup_minutes=session_warmup_minutes
+        )
+        schedule.job_id = job_id
+        schedule.warmup_job_id = warmup_job_id
+
+        db.session.commit()
+
+        logger.info(f"Created schedule #{schedule.id}")
+        logger.info(f"  job_id: {job_id}, warmup_job_id: {warmup_job_id}")
+        logger.info(f"  execute_at: {execute_at}")
+        logger.info(f"  seat_ids: {seat_ids}")
+        logger.info(f"  wave_interval: {wave_interval_ms}ms, burst_retry: {burst_retry_count}")
+        logger.info(f"  pre_fire: {pre_fire_ms}ms, warmup: {session_warmup_minutes}min")
+
+        return jsonify({
+            'success': True,
+            'message': '스케줄이 등록되었습니다',
+            'schedule': schedule.to_dict()
+        }), 201
+
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Failed to create schedule: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/schedules/<int:schedule_id>', methods=['GET'])
+@require_auth
+def get_reservation_schedule(schedule_id):
+    """예약 스케줄 상세 조회"""
+    try:
+        schedule = ReservationSchedule.query.get_or_404(schedule_id)
+        return jsonify(schedule.to_dict()), 200
+    except Exception as e:
+        logger.error(f"Failed to get schedule: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/schedules/<int:schedule_id>', methods=['DELETE'])
+@require_auth
+def delete_reservation_schedule(schedule_id):
+    """예약 스케줄 삭제"""
+    try:
+        schedule = ReservationSchedule.query.get_or_404(schedule_id)
+
+        # APScheduler에서 메인 작업 제거
+        if schedule.job_id:
+            scheduler_service.remove_job(schedule.job_id)
+
+        # APScheduler에서 워밍업 작업도 제거
+        if schedule.warmup_job_id:
+            scheduler_service.remove_job(schedule.warmup_job_id)
+
+        # 세션 워밍업 정리
+        from app.services.session_warmup_service import session_warmup_service
+        session_warmup_service.stop_warmup(schedule_id)
+
+        db.session.delete(schedule)
+        db.session.commit()
+
+        logger.info(f"Deleted schedule #{schedule_id} with warmup cleanup")
+
+        return jsonify({
+            'success': True,
+            'message': '스케줄이 삭제되었습니다'
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Failed to delete schedule: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/schedules/<int:schedule_id>/toggle', methods=['POST'])
+@require_auth
+def toggle_reservation_schedule(schedule_id):
+    """예약 스케줄 활성화/비활성화"""
+    try:
+        schedule = ReservationSchedule.query.get_or_404(schedule_id)
+
+        if schedule.status == 'pending':
+            # 비활성화
+            schedule.status = 'paused'
+            if schedule.job_id:
+                scheduler_service.pause_job(schedule.job_id)
+            message = '스케줄이 일시 중지되었습니다'
+        elif schedule.status == 'paused':
+            # 활성화
+            schedule.status = 'pending'
+            if schedule.job_id:
+                scheduler_service.resume_job(schedule.job_id)
+            message = '스케줄이 재개되었습니다'
+        else:
+            return jsonify({'error': f'현재 상태({schedule.status})에서는 토글할 수 없습니다'}), 400
+
+        db.session.commit()
+
+        return jsonify({
+            'success': True,
+            'message': message,
+            'schedule': schedule.to_dict()
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Failed to toggle schedule: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/schedules/<int:schedule_id>/cancel', methods=['POST'])
+@require_auth
+def cancel_reservation_schedule(schedule_id):
+    """예약 스케줄 취소"""
+    try:
+        schedule = ReservationSchedule.query.get_or_404(schedule_id)
+
+        if schedule.status in ['completed', 'cancelled']:
+            return jsonify({'error': '이미 완료되었거나 취소된 스케줄입니다'}), 400
+
+        # APScheduler에서 메인 작업 제거
+        if schedule.job_id:
+            scheduler_service.remove_job(schedule.job_id)
+
+        # APScheduler에서 워밍업 작업도 제거
+        if schedule.warmup_job_id:
+            scheduler_service.remove_job(schedule.warmup_job_id)
+
+        # 세션 워밍업 정리
+        from app.services.session_warmup_service import session_warmup_service
+        session_warmup_service.stop_warmup(schedule_id)
+
+        schedule.status = 'cancelled'
+        db.session.commit()
+
+        logger.info(f"Cancelled schedule #{schedule_id} with warmup cleanup")
+
+        return jsonify({
+            'success': True,
+            'message': '스케줄이 취소되었습니다',
+            'schedule': schedule.to_dict()
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Failed to cancel schedule: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+# =====================================================
+# 텔레그램 봇 대화자 목록
+# =====================================================
+
+@bp.route('/settings/telegram/chats', methods=['GET'])
+@require_auth
+def get_telegram_chats():
+    """텔레그램 봇에 대화한 사용자/채팅방 목록 조회"""
+    try:
+        settings = AppSettings.query.first()
+        if not settings or not settings.telegram_bot_token:
+            return jsonify({
+                'success': False,
+                'message': '텔레그램 봇 토큰이 설정되지 않았습니다',
+                'chats': []
+            }), 400
+
+        import requests
+
+        # getUpdates API로 최근 대화 목록 가져오기
+        bot_token = settings.telegram_bot_token
+        url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
+
+        response = requests.get(url, timeout=10)
+        data = response.json()
+
+        if not data.get('ok'):
+            return jsonify({
+                'success': False,
+                'message': f"텔레그램 API 오류: {data.get('description', 'Unknown error')}",
+                'chats': []
+            }), 400
+
+        # 고유한 채팅방/사용자 추출
+        chats_dict = {}
+        for update in data.get('result', []):
+            message = update.get('message') or update.get('edited_message') or update.get('channel_post')
+            if message:
+                chat = message.get('chat', {})
+                chat_id = chat.get('id')
+                if chat_id and chat_id not in chats_dict:
+                    chat_type = chat.get('type', 'unknown')
+
+                    # 채팅 이름 결정
+                    if chat_type == 'private':
+                        name = f"{chat.get('first_name', '')} {chat.get('last_name', '')}".strip()
+                        username = chat.get('username', '')
+                    elif chat_type in ['group', 'supergroup']:
+                        name = chat.get('title', 'Unknown Group')
+                        username = ''
+                    elif chat_type == 'channel':
+                        name = chat.get('title', 'Unknown Channel')
+                        username = chat.get('username', '')
+                    else:
+                        name = 'Unknown'
+                        username = ''
+
+                    chats_dict[chat_id] = {
+                        'chat_id': str(chat_id),
+                        'type': chat_type,
+                        'name': name or f"User {chat_id}",
+                        'username': username,
+                        'is_current': str(chat_id) == settings.telegram_chat_id
+                    }
+
+        # 리스트로 변환 (현재 선택된 것 먼저)
+        chats_list = sorted(
+            chats_dict.values(),
+            key=lambda x: (not x['is_current'], x['name'].lower())
+        )
+
+        return jsonify({
+            'success': True,
+            'chats': chats_list,
+            'count': len(chats_list),
+            'current_chat_id': settings.telegram_chat_id
+        }), 200
+
+    except requests.Timeout:
+        logger.error("Telegram API timeout")
+        return jsonify({
+            'success': False,
+            'message': '텔레그램 API 응답 시간 초과',
+            'chats': []
+        }), 500
+    except Exception as e:
+        logger.error(f"Failed to get telegram chats: {e}")
+        return jsonify({
+            'success': False,
+            'message': str(e),
+            'chats': []
+        }), 500

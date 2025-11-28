@@ -33,7 +33,15 @@
       "Bash(git add:*)",
       "Bash(del backendnul 2)",
       "Bash(git rm:*)",
-      "Bash(del nul)"
+      "Bash(del nul)",
+      "Bash(git commit:*)",
+      "Bash(gh:*)",
+      "Bash(git remote add:*)",
+      "Bash(git branch:*)",
+      "Bash(git push:*)",
+      "Bash(del /S /Q app__pycache__ appscrapers__pycache__)",
+      "Bash(venvScriptspython.exe scriptsadd_dry_run_setting.py)",
+      "Bash(venvScriptspython.exe scriptsadd_schedule_dry_run.py)"
     ],
     "deny": [],
     "ask": []
