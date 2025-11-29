@@ -49,7 +49,8 @@ class Config:
 
     # 로깅
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
-    LOG_FILE = os.getenv('LOG_FILE', '../../logs/app.log')
+    # backend/logs/app.log 경로 사용
+    LOG_FILE = os.getenv('LOG_FILE', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs', 'app.log'))
 
     # 자동 예약 설정
     AUTO_RESERVE_ENABLED = os.getenv('AUTO_RESERVE_ENABLED', 'true').lower() == 'true'
